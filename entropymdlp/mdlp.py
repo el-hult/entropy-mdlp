@@ -1,166 +1,166 @@
-from math import log
 import numpy as np
-from bisect import bisect_right
+from numba import njit
 
 
-def discretize_feature(x, binning):
-    '''
-    Discretize a feature x with respective to the given binning
-    '''
-    x_discrete = [1 for i in range(len(x))]
-    for i in range(len(x)):
-        for cut_value in binning:
-            if x[i] > cut_value:
-                x_discrete[i] = x_discrete[i] + 1
-    return np.array(x_discrete)
-
-def target_table(target):
-    '''
-    Create a numpy array that counts the occurrences
-    of values of the input vector
-    Example:
-    target_table([1,2,2,3,4,5,5,5,5,6])
-    >>> array([1,2,1,1,4,1])
-    '''
-    return np.unique(target, return_counts=True)[1]
-
-def stable_log(input):
-    '''
-    Stable version of natural logarithm, which
-    replaces elements smaller than 1*e^(-10) by
-    one to avoid infinite values, then applies log as usual.
-    The input variable has to be a numpy array.
-    Example:
-    stable_log([0,1,2])
-    >>> array([1,2,3,4,5,6])
-    '''
-    copy = input.copy()
-    copy[copy <= 1e-10] = 1
-    return np.log(copy)
-    
+@njit(cache=True)
 def entropy(variable):
-    '''
-    Compute the Shannon entropy of the input variable
+    """
+    Compute the Shannon entropy of an input variable with categorical values
+
+    Assumes that all values the variable can take are present in the vector of data
+
     Example:
-    stable_log(np.array([0,1,2]))
-    >>> array([0., 0., 0.69314718])
-    '''
-    prob = target_table(variable) / len(variable)
-    ent = -sum(prob * stable_log(prob))
+    >>> entropy(np.array([1]))
+    0
+    """
+    assert variable.size > 0
+    values = np.unique(variable)
+    counts = np.zeros(len(values))
+    for k, v in enumerate(values):
+        counts[k] = (variable == v).sum()
+    N = len(variable)
+    ent = np.log2(N) - (counts @ np.log2(counts)) / N
     return ent
 
-def levels(variable):
-    '''
-    Create a numpy array that lists each value of the
-    input vector once.
-    Example:
-    levels([1,2,2,3,4,5,5,5,5,6])
-    >>> array([1,2,3,4,5,6])
-    '''
-    return np.unique(variable)
 
-def stopping_criterion(cut_idx, target, ent):
-    '''
-    Stopping criterion of the MDLP algorithm. Specifying a
-    cutting index cut_idx, a target vector and the current entropy,
-    the function will compute the entropy of the vector split by
-    the cutting point.
-    If the gain in further splitting, i.e. the decrease in entropy
-    is too small, the algorithm will return "None" and MDLP will
-    be stopped.
-    '''
-    n = len(target)
-    target_entropy = entropy(target)
-    gain = target_entropy - ent
-    
-    k = len(np.unique(target))
-    k1 = len(np.unique(target[: cut_idx]))
-    k2 = len(np.unique(target[cut_idx: ]))
-    
-    delta = (log(3**k - 2) - (k * target_entropy
-                - k1 * entropy(target[: cut_idx])
-                - k2 * entropy(target[cut_idx: ])))
-    cond = log(n - 1) / n + delta / n
+@njit(cache=True)
+def should_partition(cut_idx, yo, ent):
+    """Should we partition yo at cut_idx?
+
+    The acceptance criterion in MDLP partitioning.
+
+    Args:
+        cut_idx, an index into yo
+        yo a vector of class indices
+
+    Notes:
+        If the gain in further splitting, i.e. the decrease in entropy
+        is too small, the algorithm will return -1,
+
+    Returns:
+        +1 if we should partition
+        0 if we should not
+    """
+    n = len(yo)
+    yo_entropy = entropy(yo)
+    gain = yo_entropy - ent
+
+    k = len(np.unique(yo))
+    k1 = len(np.unique(yo[:cut_idx]))
+    k2 = len(np.unique(yo[cut_idx:]))
+
+    delta = np.log2(3 ** k - 2) - (
+        k * yo_entropy - k1 * entropy(yo[:cut_idx]) - k2 * entropy(yo[cut_idx:])
+    )
+    cond = np.log2(n - 1) / n + delta / n
     if gain >= cond:
-        return gain
+        return +1
     else:
-        return None
+        return 0
 
-def find_cut_index(x, y):
-    '''
-    Determine the optimal cutting point (in the sense
-    of minimizing entropy) for a feature vector x and
-    a corresponding target vector y.
-    The function will return the index of this point
-    and the respective entropy.
-    '''
-    n = len(y)
-    init_entropy = 9999
-    current_entropy = init_entropy
-    index = None
-    for i in range(n - 1):
-        if (x[i] != x[i+1]):
-            cut = (x[i] + x[i + 1]) / 2.
-            cutx = bisect_right(x, cut)
-            weight_cutx = cutx / n
-            left_entropy = weight_cutx * entropy(y[: cutx])
-            right_entropy = (1 - weight_cutx) * entropy(y[cutx: ])
-            temp = left_entropy + right_entropy
-            if temp < current_entropy:
-                current_entropy = temp
-                index = i + 1
-    if index is not None:
-        return [index, current_entropy]
+
+@njit(cache=True)
+def find_cut_index(yo, cut_point_candidates):
+    """Find best cutting point for binary partition of yo
+
+    Args:
+        cut_point_candidates: potential indices into yo where
+            it makes sense to make a cut
+
+    Returns:
+        (cut_index,current_entropy) if there is a cut point that improves the measure
+            cut_index is an index into cut_point_candidates
+        (-1,0) if no split improves the target function
+
+    """
+    n = len(yo)
+    current_entropy = np.inf
+    cut_index = -1
+    for cut_candidate_index, cut_point_candidate in enumerate(cut_point_candidates):
+        weight_cutx = cut_point_candidate / n
+        left_entropy = weight_cutx * entropy(yo[:cut_point_candidate])
+        right_entropy = (1 - weight_cutx) * entropy(yo[cut_point_candidate:])
+        temp = left_entropy + right_entropy
+        if temp < current_entropy:
+            current_entropy = temp
+            cut_index = cut_candidate_index
+    if cut_index == -1:
+        return (-1, 0)
     else:
-        return None
+        return (cut_index, current_entropy)
+
+
+@njit(cache=True)
+def next_cut(yo, cut_point_candidates):
+    """Helper to `part`
+
+    Args
+        cut_point_candidates: indices into xo where we might take cuts
+
+    Returns
+        ci such that there is a cut point at cut_point_candidates[ci] that improves the score
+        -1 if no good cut exists"""
+    cut_index, current_entropy = find_cut_index(yo, cut_point_candidates)
+    if cut_index == -1:
+        return -1
+
+    cut_point = cut_point_candidates[cut_index]
+    if should_partition(cut_point, yo, current_entropy):
+        return cut_index
+    else:
+        return -1
+
+
+def partition(yo, cut_point_candidates):
+    """Helper to `cut_points` that is recursivel acting on partitions
+
+    Args:
+        cut_point_candidates is a list of indices into yo for potential cut points
+
+    Returns:
+        integer valued array with indices IN SORTED ORDER
+    """
+    empty = np.array([], dtype=cut_point_candidates.dtype)
+    if cut_point_candidates.size == 0:
+        return empty
+
+    ci = next_cut(yo=yo, cut_point_candidates=cut_point_candidates)
+    if ci == -1:
+        return empty
+
+    cut_index = cut_point_candidates[ci]
+    left_cuts = partition(
+        yo=yo[:cut_index], cut_point_candidates=cut_point_candidates[:ci]
+    )
+    right_cuts = (
+        partition(
+            yo=yo[cut_index:],
+            cut_point_candidates=cut_point_candidates[ci + 1 :] - cut_index,
+        )
+        + cut_index
+    )
+    out = np.concatenate(
+        (left_cuts, [cut_index], right_cuts), dtype=cut_point_candidates.dtype
+    )
+    return out
+
 
 def cut_points(x, y):
-    '''
+    """
     Main function for the MDLP algorithm. A feature vector x
     and a target vector y are given as input, the algorithm
     computes a list of cut-values used for binning the variable x.
-    '''
+    """
+    assert x.ndim == 1
+    assert x.shape == y.shape
     sorted_index = np.argsort(x)
     xo = x[sorted_index]
     yo = y[sorted_index]
-    depth = 1
 
-    def getIndex(low, upp, depth=depth):
-        x = xo[low:upp]
-        y = yo[low:upp]
-        cut = find_cut_index(x, y)
-        if cut is None:
-            return None
-        cut_index = int(cut[0])
-        current_entropy = cut[1]
-        ret = stopping_criterion(cut_index, np.array(y),
-                                        current_entropy)
-        if ret is not None:
-            return [cut_index, depth + 1]
-        else:
-            return None
+    cut_point_candidates = (
+        np.argwhere((np.diff(xo) != 0) & (np.diff(yo) != 0))
+    ).flatten() + 1  #
 
-    def part(low=0, upp=len(xo)-1, cut_points=np.array([]), depth=depth):
-        x = xo[low: upp]
-        if len(x) < 2:
-            return cut_points
-        cc = getIndex(low, upp, depth=depth)
-        if (cc is None):
-            return cut_points
-        ci = int(cc[0])
-        depth = int(cc[1])
-        cut_points = np.append(cut_points, low + ci)
-        cut_points = cut_points.astype(int)
-        cut_points.sort()
-        return (list(part(low, low + ci, cut_points, depth=depth))
-                + list(part(low + ci + 1, upp, cut_points, depth=depth)))
-
-    res = part(depth=depth)
-    cut_index = None
-    cut_value = []
-    if res is not None:
-            cut_index = res
-            for indices in cut_index:
-                    cut_value.append((xo[indices-1] + xo[indices])/2.0)
-    result = np.unique(cut_value)
-    return result
+    cut_indices = partition(yo=yo, cut_point_candidates=cut_point_candidates)
+    cut_values = (xo[cut_indices - 1] + xo[cut_indices]) / 2.0
+    return cut_values
