@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit
 
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def entropy(variable):
     """
     Compute the Shannon entropy of an input variable with categorical values
@@ -23,7 +23,7 @@ def entropy(variable):
     return ent
 
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def should_partition(cut_idx, yo, ent):
     """Should we partition yo at cut_idx?
 
@@ -59,7 +59,7 @@ def should_partition(cut_idx, yo, ent):
         return 0
 
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def find_cut_index(yo, cut_point_candidates):
     """Find best cutting point for binary partition of yo
 
@@ -90,7 +90,7 @@ def find_cut_index(yo, cut_point_candidates):
         return (cut_index, current_entropy)
 
 
-@njit(cache=True)
+@njit(cache=True,nogil=True)
 def next_cut(yo, cut_point_candidates):
     """Helper to `part`
 
@@ -110,7 +110,6 @@ def next_cut(yo, cut_point_candidates):
     else:
         return -1
 
-
 def partition(yo, cut_point_candidates):
     """Helper to `cut_points` that is recursivel acting on partitions
 
@@ -119,6 +118,12 @@ def partition(yo, cut_point_candidates):
 
     Returns:
         integer valued array with indices IN SORTED ORDER
+
+    Note:
+        Since this function is written as multiple recursion, numba cannot compile it. :(
+        Numba can only handle single recursion https://numba.readthedocs.io/en/stable/proposals/typing_recursion.html
+        If anyone (me?) bothers rewriting this function, I suppose we can get some speedups. I'm not sure thouhg.
+        This function does not do a lot of work.
     """
     empty = np.array([], dtype=cut_point_candidates.dtype)
     if cut_point_candidates.size == 0:
